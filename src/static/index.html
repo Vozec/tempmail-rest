@@ -187,6 +187,39 @@ body{font-family:var(--sans);font-size:13px;line-height:1.5;-webkit-font-smoothi
 }
 .acc-focus:hover{color:var(--acc);background:var(--acc-d)}
 
+/* ── Pinned section ── */
+.pin-hdr{color:var(--acc);gap:5px}
+.pin-list{flex-shrink:0}
+.pin-row{
+  display:flex;align-items:center;gap:5px;
+  padding:4px 10px;cursor:pointer;
+  border-bottom:1px solid var(--b0);
+  transition:background .1s;
+}
+.pin-row:hover{background:var(--acc-d)}
+.pin-row.in-session{cursor:default;opacity:.5}
+.pin-row.in-session:hover{background:transparent}
+.pin-icon{color:var(--acc);flex-shrink:0;display:flex;align-items:center}
+.pin-prov{
+  font-family:var(--mono);font-size:9px;color:var(--t3);
+  background:var(--b1);border:1px solid var(--b2);
+  border-radius:3px;padding:1px 4px;flex-shrink:0;margin-left:auto;
+}
+.pinned-on{color:var(--acc) !important}
+
+/* ── Archive section ── */
+.arch-hdr{
+  display:flex;align-items:center;gap:4px;
+  color:var(--t3);
+}
+.arch-hdr:hover{color:var(--t2)}
+.arch-list{overflow-y:auto;flex-shrink:0;max-height:160px}
+.hist-row .acc-email{color:var(--t3);font-size:10px}
+.hist-row:hover .acc-email{color:var(--t2)}
+.hist-row.active .acc-email{color:var(--t2)}
+.hist-row .acc-count{background:var(--b2);color:var(--t3)}
+.arch-cnt{font-size:9px}
+
 .msg-acct{
   font-family:var(--mono);font-size:9px;color:var(--t3);
   margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
@@ -372,6 +405,20 @@ body{font-family:var(--sans);font-size:13px;line-height:1.5;-webkit-font-smoothi
       <div class="no-accs" id="noAccs">No active mailboxes</div>
     </div>
 
+    <!-- pinned / shared -->
+    <div class="sec pin-hdr" id="pinHdr" style="display:none">
+      <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor"><path d="M16 1l-1.5 1.5L16 4l-4 4-3-1-5 5 3 3-3 3h4l2-2 3 3 5-5-1-3 4-4 1.5 1.5L22 8z"/></svg>
+      Pinned
+    </div>
+    <div class="pin-list" id="pinList"></div>
+
+    <!-- archive (history) -->
+    <div class="sec arch-hdr" id="archHdr" onclick="toggleArchive()" style="display:none;cursor:pointer;user-select:none">
+      Archive
+      <svg id="archChev" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:auto;transition:transform .15s"><polyline points="6 9 12 15 18 9"/></svg>
+    </div>
+    <div class="arch-list" id="archList" style="display:none"></div>
+
     <!-- inbox bar (hidden until account active) -->
     <div class="inbox-bar" id="inboxBar" style="display:none">
       <div class="sec">Inbox</div>
@@ -412,16 +459,21 @@ const API = '/api';
 const S = {
   provider:        '',
   accounts:        [],   // [{email, token, provider, msgs:[]}]
+  history:         [],   // [{email, token, provider, archivedAt, msgs:[]}]
   activeIdx:       -1,
+  historyIdx:      -1,   // >= 0 when viewing an archived account
   selectedMsgId:   null,
   autoOn:          false,
   autoTimer:       null,
   darkEmail:       false,
   busy:            false,
-  _providerStatus: [],   // [{name, disabled, failures}]
+  _providerStatus: [],
+  _pinned: [],         // [{email, token, provider, label, pinned_at}] — from server
 };
 
 /* ── Persistence ───────────────────────────────────────────────────────── */
+const _EMAIL_RE = /^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]{2,}$/;
+
 function save() {
   localStorage.setItem('tm_accounts', JSON.stringify(
     S.accounts.map(a => ({email:a.email, token:a.token, provider:a.provider}))
@@ -429,19 +481,65 @@ function save() {
   localStorage.setItem('tm_activeIdx', String(S.activeIdx));
 }
 
-const _EMAIL_RE = /^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]{2,}$/;
+function saveHistory() {
+  try {
+    localStorage.setItem('tm_history', JSON.stringify(
+      S.history.slice(0, 100).map(h => ({
+        email: h.email, token: h.token, provider: h.provider,
+        archivedAt: h.archivedAt,
+        msgs: (h.msgs||[]).map(m => ({
+          id:m.id, from_addr:m.from_addr, to_addr:m.to_addr,
+          subject:m.subject, created_at:m.created_at
+        }))
+      }))
+    ));
+  } catch {}
+}
+
+function saveMsgs(email, msgs) {
+  try {
+    localStorage.setItem('tm_msgs_' + email, JSON.stringify(
+      msgs.map(m => ({id:m.id, from_addr:m.from_addr, to_addr:m.to_addr,
+                      subject:m.subject, created_at:m.created_at}))
+    ));
+  } catch {}
+}
+
+function loadMsgs(email) {
+  try { return JSON.parse(localStorage.getItem('tm_msgs_' + email) || '[]'); }
+  catch { return []; }
+}
+
+function saveBodies(email, map) {
+  try { localStorage.setItem('tm_bodies_' + email, JSON.stringify(map)); }
+  catch {}
+}
+
+function loadBodies(email) {
+  try { return JSON.parse(localStorage.getItem('tm_bodies_' + email) || '{}'); }
+  catch { return {}; }
+}
+
+function cleanupMsgStorage(email) {
+  localStorage.removeItem('tm_msgs_' + email);
+  localStorage.removeItem('tm_bodies_' + email);
+}
 
 function restore() {
   try {
     const raw = localStorage.getItem('tm_accounts');
-    if (!raw) return;
-    const saved = JSON.parse(raw);
-    S.accounts = saved
-      .filter(a => a.email && _EMAIL_RE.test(a.email.trim()))
-      .map(a => ({...a, msgs:[]}));
-    const i = parseInt(localStorage.getItem('tm_activeIdx') || '-1');
-    S.activeIdx = (S.accounts.length > 0) ? Math.max(-1, Math.min(i, S.accounts.length-1)) : -1;
-    save(); // persist the cleaned list
+    if (raw) {
+      const saved = JSON.parse(raw);
+      S.accounts = saved
+        .filter(a => a.email && _EMAIL_RE.test(a.email.trim()))
+        .map(a => ({...a, msgs: loadMsgs(a.email)}));
+      const i = parseInt(localStorage.getItem('tm_activeIdx') || '-1');
+      S.activeIdx = (S.accounts.length > 0) ? Math.max(-1, Math.min(i, S.accounts.length-1)) : -1;
+    }
+    try {
+      S.history = JSON.parse(localStorage.getItem('tm_history') || '[]');
+    } catch { S.history = []; }
+    save();
   } catch {}
 }
 
@@ -505,6 +603,96 @@ async function onProvToggle() {
   updateProvToggleBtn();
 }
 
+/* ── Shared / Pinned emails ─────────────────────────────────────────────── */
+async function loadPinned() {
+  try {
+    S._pinned = await fetch(`${API}/shared`).then(r => r.json());
+    renderPinned();
+    renderAccounts(); // refresh pin icons
+  } catch {}
+}
+
+function renderPinned() {
+  const hdr  = $('pinHdr');
+  const list = $('pinList');
+  if (!S._pinned.length) {
+    hdr.style.display  = 'none';
+    list.innerHTML = '';
+    return;
+  }
+  hdr.style.display = '';
+  list.innerHTML = '';
+  S._pinned.forEach(p => {
+    const inSession = S.accounts.some(a => a.email === p.email);
+    const row = el('div', 'pin-row' + (inSession ? ' in-session' : ''));
+    row.title = inSession ? 'Already in your session' : 'Click to add to your session';
+
+    const icon = el('span', 'pin-icon');
+    icon.innerHTML = `<svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><path d="M16 1l-1.5 1.5L16 4l-4 4-3-1-5 5 3 3-3 3h4l2-2 3 3 5-5-1-3 4-4 1.5 1.5L22 8z"/></svg>`;
+
+    const addr = el('div', 'acc-email');
+    addr.textContent = p.label || p.email;
+    addr.title = p.email;
+
+    const prov = el('span', 'pin-prov');
+    prov.textContent = p.provider;
+
+    const unpin = el('button', 'acc-x');
+    unpin.textContent = '×';
+    unpin.title = 'Unpin';
+    unpin.onclick = e => { e.stopPropagation(); unpinEmail(p.email); };
+
+    row.appendChild(icon);
+    row.appendChild(addr);
+    row.appendChild(prov);
+    row.appendChild(unpin);
+    if (!inSession) row.onclick = () => addSharedToSession(p);
+    list.appendChild(row);
+  });
+}
+
+async function pinEmail(acctIdx) {
+  const acct = S.accounts[acctIdx];
+  if (!acct) return;
+  try {
+    const r = await fetch(`${API}/shared`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email: acct.email, token: acct.token, provider: acct.provider}),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      throw new Error(e.detail || `HTTP ${r.status}`);
+    }
+    await loadPinned();
+    toast('Pinned — visible to everyone', 'ok');
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+async function unpinEmail(email) {
+  try {
+    await fetch(`${API}/shared/${enc(email)}`, {method: 'DELETE'});
+    await loadPinned();
+    toast('Unpinned', 'warn');
+  } catch { toast('Failed', 'err'); }
+}
+
+function addSharedToSession(p) {
+  if (S.accounts.some(a => a.email === p.email)) {
+    toast('Already in session', 'warn');
+    return;
+  }
+  const msgs = loadMsgs(p.email);
+  S.accounts.push({email: p.email, token: p.token, provider: p.provider, msgs});
+  S.activeIdx = S.accounts.length - 1;
+  S.historyIdx = -1;
+  S.selectedMsgId = null;
+  save();
+  renderAll();
+  toast('Added to session', 'ok');
+  refreshAccount(S.activeIdx);
+}
+
 async function toggleProvider(name, disable) {
   const action = disable ? 'disable' : 'enable';
   try {
@@ -551,10 +739,19 @@ async function generate() {
 
 /* ── Account actions ───────────────────────────────────────────────────── */
 function selectAccount(idx) {
-  if (S.activeIdx === idx) return;
+  if (S.activeIdx === idx && S.historyIdx === -1) return;
   S.activeIdx = idx;
+  S.historyIdx = -1;
   S.selectedMsgId = null;
   save();
+  renderAll();
+}
+
+function selectHistory(idx) {
+  if (S.historyIdx === idx) return;
+  S.historyIdx = idx;
+  S.activeIdx = -1;
+  S.selectedMsgId = null;
   renderAll();
 }
 
@@ -568,12 +765,35 @@ async function deleteAccount(idx, e) {
       {method: 'DELETE'}
     );
   } catch {}
+  // Archive before removing
+  const msgs = acct.msgs.length ? acct.msgs : loadMsgs(acct.email);
+  S.history.unshift({
+    email: acct.email, token: acct.token, provider: acct.provider,
+    archivedAt: Date.now(), msgs,
+  });
+  if (S.history.length > 100) S.history.pop();
+  saveHistory();
+
   S.accounts.splice(idx, 1);
   if (S.activeIdx >= S.accounts.length) S.activeIdx = S.accounts.length - 1;
+  S.historyIdx = -1;
   S.selectedMsgId = null;
   save();
   renderAll();
-  toast('Mailbox deleted');
+  toast('Mailbox archived');
+}
+
+function removeHistory(idx, e) {
+  e.stopPropagation();
+  const h = S.history[idx];
+  if (!h) return;
+  cleanupMsgStorage(h.email);
+  S.history.splice(idx, 1);
+  if (S.historyIdx === idx) { S.historyIdx = -1; S.selectedMsgId = null; }
+  else if (S.historyIdx > idx) S.historyIdx--;
+  saveHistory();
+  renderAll();
+  toast('Removed from archive');
 }
 
 /* ── Refresh ───────────────────────────────────────────────────────────── */
@@ -588,8 +808,9 @@ async function refreshAccount(idx) {
     const msgs = await r.json();
     const prev = acct.msgs.length;
     acct.msgs = msgs;
+    saveMsgs(acct.email, msgs);
     renderAccounts();
-    if (idx === S.activeIdx) renderMsgList();
+    if (idx === S.activeIdx && S.historyIdx === -1) renderMsgList();
     if (msgs.length > prev && idx === S.activeIdx && prev >= 0) {
       const n = msgs.length - prev;
       toast(`+${n} new message${n > 1 ? 's' : ''}`, 'ok');
@@ -614,11 +835,27 @@ async function refresh() {
 async function openMsg(msgId, acctIdx) {
   S.selectedMsgId = msgId;
   renderMsgList();
+  const viewer = $('viewer');
+
+  // History mode: load from cache only
+  if (S.historyIdx >= 0) {
+    const h = S.history[S.historyIdx];
+    const meta = h.msgs.find(m => m.id === msgId);
+    const bodies = loadBodies(h.email);
+    const body = bodies[msgId];
+    if (meta && body) {
+      renderEmail({...meta, ...body});
+    } else if (meta) {
+      renderEmail({...meta, body_html: null, body_text: '(body not cached — message was not opened before archiving)'});
+    } else {
+      viewer.innerHTML = `<div class="email-loading" style="color:var(--t3)">Message not cached</div>`;
+    }
+    return;
+  }
 
   const acct = acctIdx !== undefined
     ? S.accounts[acctIdx]
     : S.accounts[S.activeIdx] ?? S.accounts.find(a => a.msgs.some(m => m.id === msgId));
-  const viewer = $('viewer');
   viewer.innerHTML = `
     <div class="email-loading">
       <div class="spin-ring"></div>loading…
@@ -629,7 +866,12 @@ async function openMsg(msgId, acctIdx) {
       `${API}/email/${enc(acct.email)}/message/${enc(msgId)}?token=${enc(acct.token)}&name=${enc(acct.provider)}`
     );
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    renderEmail(await r.json());
+    const msg = await r.json();
+    // Cache body
+    const bodies = loadBodies(acct.email);
+    bodies[msgId] = {body_html: msg.body_html, body_text: msg.body_text};
+    saveBodies(acct.email, bodies);
+    renderEmail(msg);
   } catch(e) {
     viewer.innerHTML = `<div class="email-loading" style="color:var(--err)">${esc(e.message)}</div>`;
   }
@@ -748,9 +990,10 @@ function stopAuto() {
 /* ── Render ────────────────────────────────────────────────────────────── */
 function renderAll() {
   renderAccounts();
+  renderHistory();
   renderMsgList();
   if (!S.selectedMsgId) renderViewer();
-  $('inboxBar').style.display = S.accounts.length ? 'flex' : 'none';
+  $('inboxBar').style.display = (S.accounts.length || S.historyIdx >= 0) ? 'flex' : 'none';
 }
 
 function renderAccounts() {
@@ -789,6 +1032,12 @@ function renderAccounts() {
     focusBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>`;
     focusBtn.onclick = e => { e.stopPropagation(); selectAccount(i); };
 
+    const isPinned = S._pinned.some(p => p.email === acct.email);
+    const pinBtn = el('button', 'acc-focus' + (isPinned ? ' pinned-on' : ''));
+    pinBtn.title = isPinned ? 'Unpin (shared)' : 'Pin / share with everyone';
+    pinBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="${isPinned ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><path d="M16 1l-1.5 1.5L16 4l-4 4-3-1-5 5 3 3-3 3h4l2-2 3 3 5-5-1-3 4-4 1.5 1.5L22 8z"/></svg>`;
+    pinBtn.onclick = e => { e.stopPropagation(); isPinned ? unpinEmail(acct.email) : pinEmail(i); };
+
     const xBtn = el('button', 'acc-x');
     xBtn.textContent = '×';
     xBtn.title = 'Delete';
@@ -800,6 +1049,7 @@ function renderAccounts() {
       const badge = el('div', 'acc-count'); badge.textContent = acct.msgs.length;
       row.appendChild(badge);
     }
+    row.appendChild(pinBtn);
     row.appendChild(focusBtn);
     row.appendChild(xBtn);
     row.onclick = () => selectAccount(i);
@@ -807,8 +1057,73 @@ function renderAccounts() {
   });
 }
 
+function renderHistory() {
+  const wrap = $('archList');
+  const hdr  = $('archHdr');
+  if (!wrap) return;
+  if (!S.history.length) {
+    wrap.style.display = 'none';
+    hdr.style.display  = 'none';
+    return;
+  }
+  hdr.style.display = '';
+  if (wrap.style.display === 'none' && S.historyIdx < 0) return; // collapsed
+
+  wrap.innerHTML = '';
+  S.history.forEach((h, i) => {
+    const row = el('div', 'acc-row hist-row' + (i === S.historyIdx ? ' active' : ''));
+    const addr = el('div', 'acc-email');
+    addr.textContent = h.email;
+    addr.title = h.email;
+    const cnt = el('div', 'acc-count arch-cnt');
+    cnt.textContent = (h.msgs||[]).length || '';
+    cnt.style.display = (h.msgs||[]).length ? '' : 'none';
+    const xBtn = el('button', 'acc-x');
+    xBtn.textContent = '×';
+    xBtn.title = 'Remove from archive';
+    xBtn.onclick = e => removeHistory(i, e);
+    row.appendChild(addr);
+    row.appendChild(cnt);
+    row.appendChild(xBtn);
+    row.onclick = () => selectHistory(i);
+    wrap.appendChild(row);
+  });
+}
+
+let _archOpen = true;
+function toggleArchive() {
+  const wrap = $('archList');
+  const chev = $('archChev');
+  _archOpen = !_archOpen;
+  wrap.style.display = _archOpen ? '' : 'none';
+  if (chev) chev.style.transform = _archOpen ? '' : 'rotate(-90deg)';
+}
+
 function renderMsgList() {
   const list = $('msgList');
+
+  // History mode
+  if (S.historyIdx >= 0) {
+    const h = S.history[S.historyIdx];
+    if (!h) { list.innerHTML = ''; return; }
+    const msgs = (h.msgs || []).map(m => ({...m, _acctEmail: null, _acctIdx: -1}));
+    if (!msgs.length) {
+      list.innerHTML = `<div class="empty-inbox"><div class="empty-hint">No messages saved</div></div>`;
+      return;
+    }
+    list.innerHTML = '';
+    msgs.forEach(msg => {
+      const row = el('div', 'msg-row' + (msg.id === S.selectedMsgId ? ' active' : ''));
+      const from = el('div', 'msg-from'); from.textContent = displayName(msg.from_addr || '');
+      const subj = el('div', 'msg-subj'); subj.textContent = msg.subject || '(no subject)';
+      const time = el('div', 'msg-time'); time.textContent = rel(msg.created_at);
+      row.appendChild(from); row.appendChild(subj); row.appendChild(time);
+      row.onclick = () => openMsg(msg.id);
+      list.appendChild(row);
+    });
+    return;
+  }
+
   if (!S.accounts.length) { list.innerHTML = ''; return; }
 
   let msgs;
@@ -859,6 +1174,16 @@ function renderMsgList() {
 
 function renderViewer() {
   const viewer = $('viewer');
+  if (S.historyIdx >= 0) {
+    const h = S.history[S.historyIdx];
+    viewer.innerHTML = `
+      <div class="v-empty">
+        <div class="v-empty-logo" style="font-size:12px;color:var(--t3);font-family:var(--mono)">${esc(h.email)}</div>
+        <div class="v-empty-sub" style="color:var(--t3)">archived · ${fmtDate(h.archivedAt/1000)}</div>
+        <div class="v-empty-sub">Select a message to read it</div>
+      </div>`;
+    return;
+  }
   if (!S.accounts.length) {
     viewer.innerHTML = `
       <div class="v-empty">
@@ -948,6 +1273,8 @@ renderAll();
 checkHealth();
 setInterval(checkHealth, 30000);
 loadProviders();
+loadPinned();
+setInterval(loadPinned, 15000);
 S.accounts.forEach((_, i) => refreshAccount(i));
 startAuto();
 </script>

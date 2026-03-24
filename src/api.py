@@ -1,7 +1,10 @@
 import asyncio
+import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
@@ -16,11 +19,36 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Shared emails store (server-side, visible to all clients)
+# ---------------------------------------------------------------------------
+
+_SHARED_PATH = Path(os.getenv("SHARED_EMAILS_PATH", "shared_emails.json"))
+_shared: list[dict] = []
+
+
+def _load_shared() -> None:
+    global _shared
+    if _SHARED_PATH.exists():
+        try:
+            _shared = json.loads(_SHARED_PATH.read_text())
+        except Exception:
+            _shared = []
+
+
+def _save_shared() -> None:
+    try:
+        _SHARED_PATH.write_text(json.dumps(_shared, indent=2))
+    except Exception as exc:
+        log.warning("shared: could not save %s: %s", _SHARED_PATH, exc)
+
+
+# ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _load_shared()
     await registry.startup()
     yield
     await registry.shutdown()
@@ -206,6 +234,46 @@ async def get_domains(provider: EmailProvider = Depends(get_provider)):
         return await provider.get_domains()
     except Exception as e:
         raise HTTPException(502, f"Provider error: {e}")
+
+
+@router.get("/shared", summary="List shared emails", tags=["Shared"])
+async def list_shared():
+    """Return all pinned/shared email accounts (visible to every client)."""
+    return _shared
+
+
+class SharedEmailBody(BaseModel):
+    email: str
+    token: str
+    provider: str
+    label: Optional[str] = None
+
+
+@router.post("/shared", summary="Pin an email", tags=["Shared"])
+async def pin_email(body: SharedEmailBody):
+    """Pin an email address so all clients can see and use it."""
+    if any(e["email"] == body.email for e in _shared):
+        raise HTTPException(409, f"{body.email!r} is already pinned")
+    _shared.append({
+        "email": body.email,
+        "token": body.token,
+        "provider": body.provider,
+        "label": body.label or "",
+        "pinned_at": int(time.time()),
+    })
+    _save_shared()
+    return _shared[-1]
+
+
+@router.delete("/shared/{email:path}", summary="Unpin an email", tags=["Shared"])
+async def unpin_email(email: str):
+    """Remove a pinned email."""
+    before = len(_shared)
+    _shared[:] = [e for e in _shared if e["email"] != email]
+    if len(_shared) == before:
+        raise HTTPException(404, f"{email!r} not found in shared list")
+    _save_shared()
+    return {"unpinned": email}
 
 
 @router.get("/health", summary="Health check", tags=["System"])
