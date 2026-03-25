@@ -231,6 +231,9 @@ body{font-family:var(--sans);font-size:13px;line-height:1.5;-webkit-font-smoothi
   letter-spacing:1.8px;text-transform:uppercase;
   color:var(--t3);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
+.mp-title.copyable{cursor:pointer;transition:color .1s}
+.mp-title.copyable:hover{color:var(--acc)}
+.mp-title.flash{color:var(--ok) !important}
 
 .msg-list{flex:1;overflow-y:auto;padding:4px 6px 8px}
 
@@ -871,16 +874,36 @@ function updateMpTitle() {
   if (!hdr || !title) return;
   const hasContent = S.accounts.length > 0 || S.historyIdx >= 0;
   hdr.style.display = hasContent ? 'flex' : 'none';
+
+  let copyEmail = null;
   if (S.historyIdx >= 0) {
     const h = S.history[S.historyIdx];
     title.textContent = h ? getLabel(h.email) : 'Archive';
+    copyEmail = h ? h.email : null;
   } else if (S.activeIdx === -1 && S.accounts.length) {
     title.textContent = 'All';
   } else if (S.activeIdx >= 0) {
     const acct = S.accounts[S.activeIdx];
     title.textContent = acct ? getLabel(acct.email) : 'Inbox';
+    copyEmail = acct ? acct.email : null;
   } else {
     title.textContent = 'Inbox';
+  }
+
+  if (copyEmail) {
+    title.classList.add('copyable');
+    title.title = `Click to copy: ${copyEmail}`;
+    title.onclick = () => {
+      navigator.clipboard.writeText(copyEmail).then(() => {
+        title.classList.add('flash');
+        setTimeout(() => title.classList.remove('flash'), 900);
+        toast('Copied', 'ok');
+      }).catch(() => toast('Clipboard unavailable', 'err'));
+    };
+  } else {
+    title.classList.remove('copyable');
+    title.title = '';
+    title.onclick = null;
   }
 }
 
