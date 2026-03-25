@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -36,6 +37,7 @@ app = FastAPI(
     redoc_url="/redoc",
     openapi_url="/openapi.json",
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 
 
 class CreateEmailRequest(BaseModel):
