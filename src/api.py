@@ -11,16 +11,20 @@ from pydantic import BaseModel
 
 from . import registry
 from . import shared_store
+from .mcp_server import mcp
 from .providers import EmailAccount, EmailProvider
 
 log = logging.getLogger(__name__)
+
+_mcp_asgi = mcp.streamable_http_app()  # initialises session_manager (lazy)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     shared_store.load()
     await registry.startup()
-    yield
+    async with mcp.session_manager.run():
+        yield
     await registry.shutdown()
 
 
@@ -253,9 +257,7 @@ async def health():
 
 
 app.include_router(router)
-
-from .mcp_server import mcp  # noqa: E402
-app.mount("/mcp", mcp.streamable_http_app())
+app.mount("/mcp", _mcp_asgi)
 
 _enable_frontend = os.getenv("ENABLE_FRONTEND", "true").lower() not in ("0", "false", "no")
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
