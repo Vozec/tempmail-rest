@@ -19,6 +19,12 @@ services:
       - FLARESOLVERR_URL=http://flaresolverr:8191
       - GMAIL_EMAIL=${GMAIL_EMAIL:-}
       - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD:-}
+      - SHARED_EMAILS_PATH=/data/shared_emails.json
+    volumes:
+      - tempmail-data:/data
     depends_on:
       - flaresolverr
     restart: unless-stopped
+
+volumes:
+  tempmail-data:
