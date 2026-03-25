@@ -1,4 +1,4 @@
-# tempmail-api
+# Tempmail-MCP
 
 <p align="center">
   <img src=".github/image.png" alt="tempmail UI" width="900">
